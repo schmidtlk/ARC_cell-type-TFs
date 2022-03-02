@@ -1,0 +1,182 @@
+---
+title: "Campbell adult mouse hypothalamus dataset - 01 Quality control"
+output: html_notebook
+---
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(Matrix)
+library(scater) 
+library(scran)
+library(BiocSingular)
+library(BiocParallel)
+library(pheatmap)
+library(plotly)
+library(batchelor)
+library(viridis)
+library(reshape2)
+library(SingleCellExperiment)
+library(cowplot)
+library(dplyr)
+library(Seurat)
+library(scuttle)
+ncores = 3
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+The dataset is based on the Campbell et al. 2017 Nature Neuroscience manuscript titled `A molecular census of arcuate hypothalamus and median eminence cell types`. This analysis is looking at the adult mouse ARC + ME dataset generated using Drop-seq.
+
+# Data loading
+
+Object class: SingleCellExperiment (QC-filtered + metadata)
+Retrieved from: https://bioconductor.org/packages/release/data/experiment/html/scRNAseq.html
+
+```{r}
+sce_object_Mm = readRDS("../Campbell_mouse_hypothalamus_data/campbell_data_annotated.rds")
+```
+
+
+# Gene annotation
+
+First, we want to map the reads to their location on the M. musculus genome, so we can determine the mitochondrial genes. These MT genes will be used in QC as a measure of cell viability/integrity.
+
+```{r}
+library(EnsDb.Mmusculus.v79)
+MM.v97_location = mapIds(EnsDb.Mmusculus.v79, keys=rownames(sce_object_Mm), column="SEQNAME", keytype="GENENAME")
+rowData(sce_object_Mm)$Symbol = rownames(sce_object_Mm)
+rowData(sce_object_Mm)$Chromosome = MM.v97_location
+rowData(sce_object_Mm)
+```
+
+
+#  Quality control
+
+We will use the following metrics for performing quality control check:
+
+1. Library size
+2. Number of expressed features
+3. Proportion of mitochondrial reads (in lieu of spike in control)
+
+```{r}
+mito_genes = which(rowData(sce_object_Mm)$Chromosome=="MT")
+ribo_genes = which(grepl("^Rp[ls]", rowData(sce_object_Mm)$Symbol, ))
+names(ribo_genes) = rowData(sce_object_Mm)$Symbol[ribo_genes]
+sce_object_QC = addPerCellQC(sce_object_Mm, subsets = list(Mito=mito_genes, Ribo=ribo_genes))
+colData(sce_object_QC)
+```
+
+## Library size
+
+First we look at the library size to see if there is similar distribution across all batches. 
+
+```{r, fig.height=6, fig.width=8}
+plotColData(sce_object_QC, x="batches", y="sum", colour_by = "batches") +
+  scale_y_log10() +
+  labs(y = "UMI count")
+```
+
+Distributions between batches look fine. There seems to be slightly higher sequencing depth in b4 as compared to other batches, but nothing to be worried about.
+
+```{r, fig.height=6, fig.width=8}
+qc.lib.size = isOutlier(sce_object_QC$sum, log=TRUE, type="both", batch = sce_object_QC$batches)
+
+plotColData(sce_object_QC, x="batches", y="sum", colour_by = I(qc.lib.size)) +
+  scale_y_log10() +
+  labs(y = "UMI count")
+```
+
+## Expressed features
+
+Let's now look at the expressed features distribution for each batch to see if we see differences.
+
+```{r, fig.height=6, fig.width=8}
+plotColData(sce_object_QC, x="batches", y="detected", colour_by = "batches") +
+  scale_y_log10() +
+  labs(y = "Number of expressed genes")
+```
+
+The plot shows a somewhat similar pattern as the library size, which is a good sign. 
+
+```{r, fig.height=6, fig.width=8}
+qc.expr.genes = isOutlier(sce_object_QC$detected, log=TRUE, type="both", batch = sce_object_QC$batches)
+
+plotColData(sce_object_QC, x="batches", y="detected", colour_by = I(qc.expr.genes)) +
+  scale_y_log10() +
+  labs(y = "Number of expressed genes")
+```
+
+## Cell complexity thresholding
+
+Let's combine both the UMI count and number of gene expressed into a single plot to look at the cell complexity thresholding.
+
+```{r, fig.height=10, fig.width=18}
+plotColData(sce_object_QC, x="sum", y="detected", colour_by = I(qc.expr.genes | qc.lib.size), other_fields = "batches") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "UMI count", y = "Number of expressed genes") +
+  facet_wrap(~batches, ncol = 3)
+```
+
+
+## Mitochondrial gene expression
+
+Next we look at per batch mitochondrial gene expression.
+
+```{r}
+plotColData(sce_object_QC, x="batches", y="subsets_Mito_percent", colour_by = "batches", other_fields = "batches")
+```
+
+Overall, this is a high quality dataset. However, the mitochondrial content for some cells exceeds an acceptable threshold of >10% or even >20%, especially for b5.
+
+To define outliers, we perform adaptive thresholding using the median absolute deviation (MAD) from the median value of the mitochondrial read proportion across all cells. 
+
+```{r}
+qc.high.mito = isOutlier(sce_object_QC$subsets_Mito_percent, nmads=3, type="higher", batch = sce_object_QC$batches)
+
+plotColData(sce_object_QC, x="batches", y="subsets_Mito_percent", colour_by = I(qc.high.mito), other_fields = "batches") +
+  labs(y = "Mitochondrial read percentage")
+```
+Since this dataset has already been QC-filtered and most of the "problematic" cells have been removed, the MAD method flags more cells than would actually need to be removed. Therefore, instead of using the MAD method, we will set a fixed threshold of 20% mitochondrial reads and define any cell exceeding this value as an outlier.  
+
+```{r}
+QC_mito_subset <- colData(sce_object_QC)$subsets_Mito_percent > 20 
+colData(sce_object_QC)$QC_mito_subset = QC_mito_subset
+plotColData(sce_object_QC, x="batches", y="subsets_Mito_percent", colour_by = "QC_mito_subset", other_fields = "batches") +
+  labs(y = "Mitochondrial read percentage")
+
+```
+After visualising the outliers, we're subsetting the dataset by column to drop any cell that has a mito content greater than 20% for downstream analysis.
+
+```{r}
+sce_object_QC <- sce_object_QC[, !colData(sce_object_QC)$QC_mito_subset] 
+```
+
+## Ribosomal gene expression
+
+Similar to the mitochondrial gene content, we check for the proportion of ribosomal reads.
+
+```{r}
+plotColData(sce_object_QC, x="batches", y="subsets_Ribo_percent", colour_by = "batches", other_fields = "batches")
+```
+
+The ribosomal content of almost all cells across batches is below an acceptable threshold of >10%.
+
+```{r}
+qc.high.ribo = isOutlier(sce_object_QC$subsets_Ribo_percent, nmads=3, type="higher", batch = sce_object_QC$batches)
+
+plotColData(sce_object_QC, x="batches", y="subsets_Ribo_percent", colour_by = I(qc.high.ribo), other_fields = "batches") +
+  labs(y = "Ribosomal read percentage")
+```
+Using an adaptive threshold based on MAD, we can visualise any outliers, but we won't have to remove any cells due to the ribosomal content.
+
+
+```{r}
+table(sce_object_QC$batches)
+```
+
+```{r}
+saveRDS(sce_object_QC, "../Campbell_mouse_hypothalamus_data/qc_cell_all.rds")
+```
+
