@@ -1,0 +1,104 @@
+---
+title: "05 MAST DE testing"
+output: html_notebook
+---
+
+#DE Testing for the identification of cell type-specific transcription factor signatures
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=8, fig.path='Figs/', echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(MAST)
+library(BiocSingular)
+n_cores <- 4
+```
+
+```{r}
+obj <- readRDS("")
+```
+
+Loading of transcription factor (TF) reference list 
+```{r}
+tfs <- read.table("", header = T, sep = "\t")
+tfs <- tfs$Symbol
+```
+
+Remove genes that are not TFs, and any TFs that are not detected in any cell
+```{r}
+mast_obj <- SceToSingleCellAssay(obj)
+mast_obj <- mast_obj[rownames(mast_obj) %in% tfs, ]
+mast_obj <- mast_obj[rowSums(assay(mast_obj)) > 0, ]
+```
+
+Create a binary condition for the 1-vs-rest DE testing across clusters
+```{r}
+group <- "Sst"
+group_number <- "7"
+clusters <- colData(mast_obj)$cluster_redone_v2
+clusters <- as.numeric(as.character(clusters))
+clusters[clusters == group_number] <- group
+clusters[clusters != group] <- "Other"
+colData(mast_obj)$Condition <- as.factor(clusters)
+```
+
+```{r}
+colData(mast_obj)$detected <- scale(colData(mast_obj)$detected)
+```
+
+```{r}
+cond <- factor(colData(mast_obj)$Condition)
+cond <- relevel(cond, "Other")
+colData(mast_obj)$Condition <- cond
+```
+
+Data fitting
+```{r}
+options(mc.cores = n_cores)
+zlm_cond <- zlm(
+  formula = ~Condition + batches + detected,
+  sca = mast_obj,
+  parallel = TRUE,
+)
+```
+
+Likelihood test
+```{r}
+summary_cond <- summary(zlm_cond, doLRT = paste0("Condition", group))
+```
+
+Data collection
+```{r}
+# Creates data table
+summary_dt <- summary_cond$datatable
+results <- merge(
+  summary_dt[
+    contrast == paste0("Condition", group) & component == "H",
+    .(primerid, `Pr(>Chisq)`)
+  ],
+  summary_dt[
+    contrast == paste0("Condition", group) & component == "logFC",
+    .(primerid, coef)
+  ],
+  by = "primerid"
+)
+
+#Drop where coef cannot be calculated
+results <- results[!is.na(results$coef)]
+```
+
+Multiple test correction and FDR-based significance threshold
+```{r}
+results[, fdr := p.adjust(`Pr(>Chisq)`, "fdr")]
+dexp <- results[results$fdr < 0.05, , drop = F]
+dexp <- dexp[order(dexp$fdr), ]
+```
+
+Output column names:
+PrimerId = gene name 
+Pr(>Chisq) = raw probability 
+Coef = log2FC
+fdr = FDR
