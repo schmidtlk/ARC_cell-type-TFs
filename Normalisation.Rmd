@@ -1,0 +1,101 @@
+---
+title: "02 Normalisation"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8, fig.height=6, fig.path='Figs/', echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(Matrix)
+library(scater) 
+library(scran)
+library(BiocSingular)
+library(BiocParallel)
+library(pheatmap)
+library(plotly)
+library(batchelor)
+library(viridis)
+library(reshape2)
+library(SingleCellExperiment)
+library(cowplot)
+library(dplyr)
+library(scuttle)
+ncores = 3
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+# Normalisation
+```{r}
+object = readRDS("")
+```
+
+## Merged normalisation
+```{r, fig.height=4}
+set.seed(1000)
+clusters = quickCluster(object, use.ranks=FALSE, BSPARAM=IrlbaParam(), BPPARAM=mcparam)
+table(clusters)
+table(object$batches, clusters)
+plot_df = melt(table(object$batches, clusters))
+plot_df$Var1 = as.character(plot_df$Var1)
+ggplot(plot_df, aes(x=clusters, y=value, fill=Var1)) + geom_bar(stat="identity") + theme_cowplot()
+```
+
+```{r}
+object = computeSumFactors(object, min.mean=0.1, cluster=clusters, BPPARAM=mcparam)
+```
+
+Visualisation of size factors
+```{r, fig.height=4}
+lib.sf.sce <- librarySizeFactors(object)
+summary(lib.sf.sce)
+hist(log10(lib.sf.sce), xlab="Log10[Size factor]", col='grey80')
+```
+
+```{r, fig.height=4}
+object_mixed = object[, sample(ncol(object))]
+plotColData(object_mixed, x="sum", y=I(sizeFactors(object_mixed)), colour_by = "batches") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Number of UMIs", y = "Size Factor") 
+```
+
+```{r, fig.width=9}
+plotColData(object_mixed, x="sum", y=I(sizeFactors(object_mixed)), colour_by = "batches", other_fields = "batches") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Number of UMIs", y = "Size Factor") +
+  facet_wrap(~batches)
+```
+
+Normalisation
+```{r}
+object_norm = logNormCounts(object)
+```
+
+Distribution of the normalised counts.
+```{r}
+data(segList, package = 'scMerge')
+
+mouse_scSEG = segList$mouse$mouse_scSEG
+
+# remove ribosomal genes
+mouse_scSEG = mouse_scSEG[grep("^Rp[ls]", mouse_scSEG, invert = T)]
+
+object_norm_qc = addPerCellQC(object_norm, exprs_values = "logcounts", subsets = list(SEG=intersect(mouse_scSEG, rownames(object))))
+colData(object_norm_qc) = colData(object_norm_qc)[, c(1:13, (length(colData(object_norm))+1):length(colData(object_norm_qc)))]
+```
+
+```{r}
+plotColData(object_norm_qc, x = "batches", y = "sum", colour_by = "batches") +
+  labs(y = "normalised UMI count")
+```
+
+```{r}
+plotColData(object_norm_qc, x = "batches", y = "subsets_SEG_sum", colour_by = "batches") +
+  labs(y = "normalised UMI count")
+```
