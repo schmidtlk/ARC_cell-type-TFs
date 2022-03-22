@@ -1,0 +1,106 @@
+---
+title: "04 Clustering"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=3, fig.path='Figs/', echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(Matrix)
+library(scater) 
+library(scran)
+library(BiocSingular)
+library(BiocParallel)
+library(pheatmap)
+library(plotly)
+library(batchelor)
+library(viridis)
+library(reshape2)
+library(SingleCellExperiment)
+library(cowplot)
+library(igraph)
+library(dplyr)
+theme_set(theme_cowplot())
+ncores = 3
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+```{r}
+color_palette = c("#5467a6",
+"#b8b937",
+"#a156c9",
+"#5bb84d",
+"#e26ece",
+"#3b8148",
+"#bc3a8f",
+"#54be9d",
+"#db416e",
+"#93ad5b",
+"#6465d0",
+"#97872b",
+"#7294e1",
+"#da7330",
+"#48b1da",
+"#d64338",
+"#c391da",
+"#696e2d",
+"#985b97",
+"#dda456",
+"#e17fa8",
+"#9f6831",
+"#9b445f",
+"#e08279",
+"#a94739",
+"#a91749")
+```
+
+# Defining clusters
+
+```{r}
+object_mnn = readRDS("")
+```
+
+Clustering by construction of shared nearest neighbour (SNN) graph and community identification using Louvain Algorithm
+```{r, fig.height=3}
+set.seed(1000)
+snn_graph = buildSNNGraph(object_mnn, use.dimred="corrected")
+clusters = cluster_louvain(snn_graph)$membership
+table(clusters)
+```
+
+```{r}
+ggplot(as.data.frame(table(clusters)), aes(x=clusters, y=Freq)) +
+    geom_bar(stat="identity") +
+    labs(x = "Cluster number", y = "Number of cells", title = paste("Louvain cluster"))
+```
+
+```{r, fig.width=12, fig.height=5}
+object_mnn$cluster_redone = as.factor(clusters)
+plot_grid(plotUMAP(object_mnn, colour_by="cluster_redone", text_by="cluster_redone") + scale_fill_manual(values = color_palette) + scale_color_manual(values = color_palette), plotUMAP(object_mnn, colour_by="batches"))
+```
+
+Visualisation of the contribution of each batch for the clustering
+```{r, fig.width=12, fig.height=8}
+plotUMAP(object_mnn, colour_by="cluster_redone", other_fields = "batches") + scale_fill_manual(values = color_palette) + scale_color_manual(values = color_palette) + facet_wrap(~batches) 
+```
+
+```{r}
+table(batches=object_mnn$batches, cluster=object_mnn$cluster_redone)
+```
+
+```{r, fig.width=10, fig.height=5}
+contributions = as.data.frame.table(table(batches=object_mnn$batches, cluster=object_mnn$cluster_redone))
+colnames(contributions) = c("batches", "Cluster", "Count")
+  
+ggplot(data=contributions, mapping = aes(x=Cluster, y=Count, fill=batches)) +
+geom_bar(stat="identity") + 
+scale_x_discrete() +
+labs(x=NULL)+
+geom_text(aes(label=Count), position=position_stack(vjust=0.5), colour="white") +
+labs(fill="")
+```
