@@ -1,0 +1,120 @@
+---
+title: "03 Batch correction"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=8, fig.path='Figs/', echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(Matrix)
+library(scater) 
+library(scran)
+library(BiocSingular)
+library(BiocParallel)
+library(pheatmap)
+library(plotly)
+library(batchelor)
+library(viridis)
+library(reshape2)
+library(SingleCellExperiment)
+library(cowplot)
+library(dplyr)
+library(scuttle)
+theme_set(theme_cowplot())
+ncores = 3
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+
+# Batch correction
+```{r}
+object = readRDS("")
+```
+
+HVGs selection (top 10%)
+```{r}
+set.seed(1000)
+non_mito_ribo_genes = rownames(object)[grep(pattern = "^(MT-|Rr[ls])", rownames(object), invert = TRUE)]
+dec_combined = modelGeneVar(object, block=object$batches, subset.row=non_mito_ribo_genes)
+```
+
+Visualisaition of QC plots from the decomposed variance and HVGs using variance of the log counts
+```{r, fig.width=10, fig.height=5}
+trend_plotlist = lapply(1:length(dec_combined$per.block), function (i){
+  batches = names(dec_combined$per.block)[[i]]
+  fit = metadata(dec_combined$per.block[[i]])
+ggplot(data = data.frame(mean = fit$mean, var = fit$var, name=ifelse(fit$mean > 4 | fit$var > 2, names(fit$mean), NA)),
+                mapping = aes(x = mean, y = var, label=name)) +
+  geom_point() +
+  ggtitle(batches) +
+  labs(x = "Mean log-expression", y = "Variance of log-expression") +
+  stat_function(fun=fit$trend, colour="dodgerblue", size=1)
+})
+
+plot_grid(plotlist = trend_plotlist, ncol=3)
+```
+
+```{r}
+set.seed(1000)
+dec_combined_noweights = modelGeneVar(object, block=object$batches, subset.row=non_mito_ribo_genes, density.weights=FALSE)
+```
+
+```{r, fig.width=10, fig.height=5}
+trend_plotlist = lapply(1:length(dec_combined_noweights$per.block), function (i){
+  batches = names(dec_combined_noweights$per.block)[[i]]
+  fit = metadata(dec_combined_noweights$per.block[[i]])
+ggplot(data = data.frame(mean = fit$mean, var = fit$var, name=ifelse(fit$mean > 4 | fit$var > 2, names(fit$mean), NA)),
+                mapping = aes(x = mean, y = var, label=name)) +
+  geom_point() +
+  ggtitle(batches) +
+  labs(x = "Mean log-expression", y = "Variance of log-expression") +
+  stat_function(fun=fit$trend, colour="dodgerblue", size=1)
+})
+
+plot_grid(plotlist = trend_plotlist, ncol=3)
+```
+
+Get HVGs 
+```{r, fig.height=3}
+set.seed(1000)
+hvg_combined = getTopHVGs(dec_combined_noweights)
+length(hvg_combined)
+```
+
+Mutual nearest neighbour (MNN) batch correction 
+```{r}
+set.seed(1000)
+object_mnn = correctExperiments(object, 
+                                    batch = object$batches,
+                                    subset.row = hvg_combined,
+                                    PARAM=FastMnnParam())
+```
+
+UMAP for visualisation
+```{r}
+set.seed(1000)
+object_mnn = runUMAP(object_mnn, ncomponents=2, dimred="corrected", spread = 1, min_dist = 0.4)
+```
+
+Comparison with UMAP for the unmerged dataset
+```{r}
+set.seed(1000)
+object = runPCA(object, subset_row=hvg_combined)
+object = runUMAP(object, ncomponents=2, dimred="PCA", spread = 1, min_dist = 0.4)
+```
+
+```{r, fig.width=10, fig.height=5}
+plot_grid(plotUMAP(object, colour_by="batches") + ggtitle("Original"), 
+          plotUMAP(object_mnn, colour_by="batches") + ggtitle("Final"))
+```
+
+```{r}
+plotUMAP(object, colour_by="batches", other_fields="batches") + ggtitle("Original") + facet_wrap(~batches) + theme(legend.position = "none")
+plotUMAP(object_mnn, colour_by="batches", other_fields="batches") + ggtitle("Final") + facet_wrap(~batches) + theme(legend.position = "none")
+```
+
