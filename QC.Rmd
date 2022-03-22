@@ -1,0 +1,137 @@
+---
+title: "01 Quality control - calculate QC metrics and filter"
+output: html_notebook
+---
+
+```{r, warning=FALSE}
+# Load required packages
+library(DropletUtils)
+library(Matrix)
+library(scater) 
+library(scran)
+library(BiocSingular)
+library(BiocParallel)
+library(pheatmap)
+library(plotly)
+library(batchelor)
+library(viridis)
+library(reshape2)
+library(SingleCellExperiment)
+library(cowplot)
+library(dplyr)
+library(Seurat)
+library(scuttle)
+ncores = 3
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+
+# Data loading
+```{r}
+object = readRDS()
+```
+
+
+# Gene annotation
+```{r}
+library(EnsDb.Mmusculus.v79)
+MM.v97_location = mapIds(EnsDb.Mmusculus.v79, keys=rownames(object), column="SEQNAME", keytype="GENENAME")
+rowData(object)$Symbol = rownames(object)
+rowData(object)$Chromosome = MM.v97_location
+rowData(object)
+```
+
+
+#  Quality control
+QC metrics:
+1. Library size
+2. Number of expressed features
+3. Proportion of mitochondrial reads (in lieu of spike in control)
+
+```{r}
+mito_genes = which(rowData(object)$Chromosome=="MT")
+ribo_genes = which(grepl("^Rp[ls]", rowData(object)$Symbol, ))
+names(ribo_genes) = rowData(object)$Symbol[ribo_genes]
+object_QC = addPerCellQC(object, subsets = list(Mito=mito_genes, Ribo=ribo_genes))
+colData(object_QC)
+```
+
+Library size
+```{r, fig.height=6, fig.width=8}
+plotColData(object_QC, x="batches", y="sum", colour_by = "batches") +
+  scale_y_log10() +
+  labs(y = "UMI count")
+```
+
+```{r, fig.height=6, fig.width=8}
+qc.lib.size = isOutlier(object_QC$sum, log=TRUE, type="both", batch = object_QC$batches)
+
+plotColData(object_QC, x="batches", y="sum", colour_by = I(qc.lib.size)) +
+  scale_y_log10() +
+  labs(y = "UMI count")
+```
+
+Expressed features
+```{r, fig.height=6, fig.width=8}
+plotColData(object_QC, x="batches", y="detected", colour_by = "batches") +
+  scale_y_log10() +
+  labs(y = "Number of expressed genes")
+```
+
+```{r, fig.height=6, fig.width=8}
+qc.expr.genes = isOutlier(object_QC$detected, log=TRUE, type="both", batch = object_QC$batches)
+
+plotColData(object_QC, x="batches", y="detected", colour_by = I(qc.expr.genes)) +
+  scale_y_log10() +
+  labs(y = "Number of expressed genes")
+```
+
+Cell complexity thresholding
+```{r, fig.height=10, fig.width=18}
+#Combines UMI count and number of expressed genes into a single plot to look at the cell complexity thresholding
+plotColData(object_QC, x="sum", y="detected", colour_by = I(qc.expr.genes | qc.lib.size), other_fields = "batches") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "UMI count", y = "Number of expressed genes") +
+  facet_wrap(~batches, ncol = 3)
+```
+
+Mitochondrial gene expression
+```{r}
+plotColData(object_QC, x="batches", y="subsets_Mito_percent", colour_by = "batches", other_fields = "batches")
+```
+
+```{r}
+#adaptive threshold using median absolute deviation (MAD) from the median value of the mitochondrial read proportion across all cells
+qc.high.mito = isOutlier(object_QC$subsets_Mito_percent, nmads=3, type="higher", batch = object_QC$batches)
+
+plotColData(object_QC, x="batches", y="subsets_Mito_percent", colour_by = I(qc.high.mito), other_fields = "batches") +
+  labs(y = "Mitochondrial read percentage")
+```
+
+```{r}
+#fixed threshold of 15%
+QC_mito_subset <- colData(object_QC)$subsets_Mito_percent > 15 
+colData(object_QC)$QC_mito_subset = QC_mito_subset
+plotColData(object_QC, x="batches", y="subsets_Mito_percent", colour_by = "QC_mito_subset", other_fields = "batches") +
+  labs(y = "Mitochondrial read percentage")
+```
+
+```{r}
+#filtering
+object_QC <- object_QC[, !colData(object_QC)$QC_mito_subset] 
+```
+
+Ribosomal gene expression
+```{r}
+plotColData(object_QC, x="batches", y="subsets_Ribo_percent", colour_by = "batches", other_fields = "batches")
+```
+
+```{r}
+qc.high.ribo = isOutlier(object_QC$subsets_Ribo_percent, nmads=3, type="higher", batch = object_QC$batches)
+
+plotColData(object_QC, x="batches", y="subsets_Ribo_percent", colour_by = I(qc.high.ribo), other_fields = "batches") +
+  labs(y = "Ribosomal read percentage")
+```
+
